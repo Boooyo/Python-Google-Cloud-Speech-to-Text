@@ -2,15 +2,28 @@ import os
 import io
 import wave
 import logging
+import concurrent.futures
 from google.cloud import speech_v1p1beta1 as speech
+import subprocess
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def check_environment_variable(var_name):
-    if var_name not in os.environ:
+def check_environment_variable(var_name, default_value=None):
+    value = os.getenv(var_name, default_value)
+    if not value:
         logging.error(f"The {var_name} environment variable is not set.")
         exit(1)
+    return value
+
+def convert_to_wav(audio_path):
+    wav_path = audio_path.rsplit('.', 1)[0] + '.wav'
+    try:
+        subprocess.run(['ffmpeg', '-i', audio_path, wav_path], check=True)
+        return wav_path
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error converting file to WAV: {e}")
+        return None
 
 def read_audio_file(audio_path):
     try:
@@ -55,13 +68,15 @@ def save_transcription_to_file(response, output_path):
     except IOError as e:
         logging.error(f"Error writing to output file: {e}")
 
-def main(audio_path, output_path):
-    check_environment_variable('GOOGLE_APPLICATION_CREDENTIALS')
-
-    if not validate_audio_file_format(audio_path):
+def process_audio_file(audio_path, output_path):
+    wav_path = convert_to_wav(audio_path)
+    if not wav_path:
         return
 
-    content = read_audio_file(audio_path)
+    if not validate_audio_file_format(wav_path):
+        return
+
+    content = read_audio_file(wav_path)
     if content is None:
         return
 
@@ -69,7 +84,19 @@ def main(audio_path, output_path):
     if response is not None:
         save_transcription_to_file(response, output_path)
 
+def main():
+    check_environment_variable('GOOGLE_APPLICATION_CREDENTIALS')
+
+    audio_dir = check_environment_variable('AUDIO_DIR', './audio_files')
+    output_dir = check_environment_variable('OUTPUT_DIR', './transcriptions')
+    os.makedirs(output_dir, exist_ok=True)
+
+    audio_files = [os.path.join(audio_dir, f) for f in os.listdir(audio_dir) if f.endswith(('wav', 'mp3', 'flac', 'm4a'))]
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = [executor.submit(process_audio_file, audio_path, os.path.join(output_dir, os.path.basename(audio_path).rsplit('.', 1)[0] + '.txt')) for audio_path in audio_files]
+        for future in concurrent.futures.as_completed(futures):
+            future.result()
+
 if __name__ == "__main__":
-    audio_path = "path_to_audio_file.wav"
-    output_path = "transcription_output.txt"
-    main(audio_path, output_path)
+    main()
